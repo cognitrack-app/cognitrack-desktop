@@ -1,6 +1,20 @@
 import React, { useState } from 'react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { auth } from '../../../../packages/api-client/src/firebase';
+import { auth } from '@cognitrack/api-client';
+
+// Maps Firebase Auth error codes to user-friendly messages.
+// Firebase's own err.message contains internal strings like
+// "Firebase: Error (auth/wrong-password)." which should never be shown raw.
+const FIREBASE_ERROR_MAP: Record<string, string> = {
+  'auth/user-not-found':        'No account found with this email.',
+  'auth/wrong-password':        'Incorrect password.',
+  'auth/invalid-credential':    'Incorrect email or password.',   // Firebase v9+
+  'auth/invalid-email':         'Please enter a valid email address.',
+  'auth/email-already-in-use':  'An account with this email already exists.',
+  'auth/too-many-requests':     'Too many attempts. Please wait and try again.',
+  'auth/network-request-failed':'Network error. Check your connection.',
+  'auth/user-disabled':         'This account has been disabled.',
+};
 
 export function SignInPopover() {
   const [email, setEmail] = useState('');
@@ -16,8 +30,10 @@ export function SignInPopover() {
       const cred = await signInWithEmailAndPassword(auth, email, password);
       // Let main process know we signed in
       window.electronAPI.signIn(cred.user.uid);
+      setLoading(false);
     } catch (err: any) {
-      setError(err.message);
+      const code = (err?.code as string) ?? '';
+      setError(FIREBASE_ERROR_MAP[code] ?? 'Sign in failed. Please try again.');
       setLoading(false);
     }
   };

@@ -6,10 +6,11 @@ import { registerIpcHandlers } from './electron/main/ipcHandlers';
 import { SQLiteStore } from './electron/main/sqliteStore';
 import { ActiveWindowTracker } from './electron/main/activeWindowTracker';
 import { waitForAuth, getTodayDateString } from './electron/main/utils';
-import { getWindowsDeviceId } from './electron/main/deviceId';
+import { getDeviceId } from './electron/main/deviceId';
 import { processBatch } from './electron/main/batchProcessor';
 import { SyncEngine } from '@cognitrack/sync-engine';
 import { registerDevice } from '@cognitrack/api-client';
+import { ensureAccessibilityPermission } from './electron/main/macPermissions';
 
 // ── Module-level singletons (set once in whenReady) ─────────────────────────
 
@@ -31,6 +32,12 @@ app.whenReady().then(async () => {
     name:         'CogniTrack',
   });
 
+  // 1b. macOS: hide Dock icon — CogniTrack is a tray agent, not a windowed app.
+  // app.dock is undefined on Windows so the optional chain is safe.
+  if (process.platform === 'darwin') {
+    app.dock?.hide();
+  }
+
   // 2. SQLite — must be first, tracker writes events immediately
   store = new SQLiteStore();
 
@@ -47,8 +54,8 @@ app.whenReady().then(async () => {
   // 6. System tray
   tray = createTray();
 
-  // 7. IPC handlers — now takes tracker + syncEngine for tray controls
-  registerIpcHandlers(store, tracker, syncEngine);
+  // 7. IPC handlers — now takes tracker + syncEngine + refreshTray callback
+  registerIpcHandlers(store, tracker, syncEngine, () => tray?.setContextMenu(buildTrayMenu()));
 
   // 8. Load the renderer so it can display the sign-in form if needed
   if (app.isPackaged) {
@@ -69,16 +76,24 @@ app.whenReady().then(async () => {
     userId = await waitForAuthFromRenderer();
   }
 
-  // 9. Register/update this device in Firestore
-  deviceId = getWindowsDeviceId();
+  // 10. Register/update this device in Firestore
+  deviceId = getDeviceId();
   await registerDevice(userId, deviceId, process.platform as any, 'CogniTrack Desktop', app.getVersion())
     .catch(err => console.warn('[startup] Device registration failed (non-fatal):', err));
 
-  // 10. Mark sync engine online and flush any queued items
+  // 11. Mark sync engine online and flush any queued items
   syncEngine.setOnline(true);
 
-  // 11. Start the active window tracker
-  tracker.start();
+  // 12. Check macOS Accessibility permission (no-op on Windows).
+  //     active-win requires this to read the frontmost application name.
+  //     If denied, the popover shows isTracking: false until the user
+  //     grants permission and relaunches.
+  const hasPermission = await ensureAccessibilityPermission();
+  if (hasPermission) {
+    tracker.start();
+  } else {
+    console.warn('[startup] Accessibility permission not granted — tracker not started');
+  }
 
   // 13. Hourly batch: compute cognitive metrics and sync to Firestore
   scheduleHourlyBatch();
@@ -88,14 +103,22 @@ app.whenReady().then(async () => {
   console.log(`[startup] CogniTrack ready — userId=${userId} deviceId=${deviceId}`);
 });
 
-// Flush final batch and clean up before quitting
-app.on('before-quit', async () => {
-  console.log('[shutdown] Running final batch before quit...');
-  if (store && syncEngine && userId && deviceId) {
-    await processBatch(store, syncEngine, userId, deviceId, mainWindow).catch(console.error);
-  }
-  tracker?.stop();
-  store?.close();
+// Flush final batch and clean up before quitting.
+// IMPORTANT: Electron does NOT await async before-quit handlers — the process
+// exits immediately after the handler returns. We block the quit with
+// e.preventDefault() and perform cleanup in an IIFE, then call app.exit(0).
+// Do NOT call app.quit() here — it would re-emit before-quit recursively.
+app.on('before-quit', (e) => {
+  e.preventDefault(); // Block OS quit until cleanup finishes
+  (async () => {
+    console.log('[shutdown] Running final batch before quit...');
+    if (store && syncEngine && userId && deviceId) {
+      await processBatch(store, syncEngine, userId, deviceId, mainWindow).catch(console.error);
+    }
+    tracker?.stop();
+    store?.close();
+    app.exit(0); // Force-exit after cleanup — bypasses before-quit to avoid recursion
+  })();
 });
 
 // Prevent full quit when all windows are closed (keep running in tray)
@@ -108,7 +131,7 @@ app.on('window-all-closed', (e: Event) => {
 function createPopoverWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width:  260,
-    height: 200,
+    height: 280,
     frame:          false,      // no OS chrome — custom titlebar via CSS
     resizable:      false,
     skipTaskbar:    true,       // don't appear in taskbar / dock
@@ -142,12 +165,16 @@ function createPopoverWindow(): BrowserWindow {
 function showPopover(): void {
   if (!mainWindow || !tray) return;
 
-  const trayBounds = tray.getBounds();
-  const windowBounds = mainWindow.getBounds();
+  const trayBounds  = tray.getBounds();
+  const winBounds   = mainWindow.getBounds();
 
-  // Position centered above the tray icon
-  const x = Math.round(trayBounds.x + trayBounds.width / 2 - windowBounds.width / 2);
-  const y = Math.round(trayBounds.y - windowBounds.height - 4);
+  const x = Math.round(trayBounds.x + trayBounds.width / 2 - winBounds.width / 2);
+
+  // macOS menu bar is at the TOP of the screen — popover goes BELOW the icon.
+  // Windows taskbar is at the BOTTOM — popover goes ABOVE the icon.
+  const y = process.platform === 'darwin'
+    ? Math.round(trayBounds.y + trayBounds.height + 4)
+    : Math.round(trayBounds.y - winBounds.height - 4);
 
   mainWindow.setPosition(x, y);
   mainWindow.show();
@@ -157,10 +184,15 @@ function showPopover(): void {
 // ── System tray ────────────────────────────────────────────────────────────
 
 function createTray(): Tray {
-  // Use a 16x16 template image for the tray icon
+  // macOS menu bar icons must be named *Template.png — Electron then
+  // automatically inverts them for dark/light mode. Windows uses the
+  // full-colour PNG (no template convention needed).
+  const isMac = process.platform === 'darwin';
+  const iconName = isMac ? 'tray-iconTemplate.png' : 'tray-icon.png';
+
   const iconPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'assets', 'tray-icon.png')
-    : path.join(__dirname, '../assets/tray-icon.png');
+    ? path.join(process.resourcesPath, 'assets', iconName)
+    : path.join(__dirname, '../assets', iconName);
 
   const icon = nativeImage.createFromPath(iconPath);
   const t = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
@@ -239,6 +271,7 @@ function waitForAuthFromRenderer(): Promise<string> {
     ipcMain.once('auth:signedIn', (_event, uid: string) => {
       if (typeof uid !== 'string' || !/^[a-zA-Z0-9]{20,128}$/.test(uid)) {
         console.error('[auth] Invalid UID received from renderer');
+        resolve(waitForAuthFromRenderer());
         return;
       }
       resolve(uid);
