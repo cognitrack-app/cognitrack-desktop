@@ -18,6 +18,7 @@ export function registerIpcHandlers(
   store: SQLiteStore,
   tracker: ActiveWindowTracker,
   syncEngine: SyncEngine,
+  refreshTray: () => void,
 ): void {
 
   // ── Tracker lifecycle ──────────────────────────────────────────────────
@@ -28,11 +29,13 @@ export function registerIpcHandlers(
 
   ipcMain.handle('tracker:pause', () => {
     tracker.stop();
+    refreshTray();
     return { isTracking: false };
   });
 
   ipcMain.handle('tracker:resume', () => {
     tracker.start();
+    refreshTray();
     return { isTracking: true };
   });
 

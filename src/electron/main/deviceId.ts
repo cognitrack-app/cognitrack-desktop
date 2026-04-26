@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
@@ -7,18 +7,19 @@ import path from 'path';
 const CACHE_FILE = 'device-id.txt';
 
 /**
- * Returns a stable, anonymised device identifier for this Windows machine.
+ * Returns a stable, anonymised device identifier for this machine.
  *
  * Strategy:
  *   1. Read from userData cache (fastest path — avoids shelling out on every launch)
- *   2. Shell out to `wmic csproduct get UUID` to retrieve the hardware GUID
+ *   2. macOS: `system_profiler SPHardwareDataType` for the Hardware UUID
+ *      Windows: PowerShell `Get-WmiObject Win32_ComputerSystemProduct` for the GUID
  *   3. SHA-256 hash the GUID so the raw hardware ID never leaves the machine
- *   4. Persist the hash to userData so step 2 only ever runs once
+ *   4. Persist the hash to userData so the shell command only ever runs once
  *
- * The resulting ID is 32 hex chars — irreversible, no PII.
- * Matches the v6 PRD: "SHA-256(Windows GUID)".
+ * The resulting ID is 64 hex chars — irreversible, no PII.
+ * Matches the v6 PRD: "SHA-256(hardware GUID)".
  */
-export function getWindowsDeviceId(): string {
+export function getDeviceId(): string {
   const cachePath = path.join(app.getPath('userData'), CACHE_FILE);
 
   // Fast path: already computed on a previous launch
@@ -47,9 +48,9 @@ function computeDeviceId(): string {
     }
 
     // The modern way to get the hardware GUID on Windows is via PowerShell WMI.
-    // 'wmic' is deprecated and removed from some Windows 11 builds.
+    // 'wmic' and 'Get-WmiObject' are deprecated and removed from some Windows 11 builds.
     const raw = execSync(
-      'powershell -NoProfile -Command "(Get-WmiObject Win32_ComputerSystemProduct).UUID"',
+      'powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"',
       { encoding: 'utf-8', timeout: 4000, windowsHide: true }
     );
 
@@ -70,10 +71,10 @@ function computeDeviceId(): string {
 }
 
 /**
- * Generates a stable random ID and persists it so it survives restarts.
- * Only used when wmic is unavailable or returns a placeholder GUID.
+ * Generates a stable random ID using crypto.randomBytes.
+ * Only used when the hardware GUID is unavailable or returns a placeholder.
+ * The result is cached to userData on the caller side so this only runs once.
  */
 function generateStableFallbackId(): string {
-  const { randomBytes } = require('crypto') as typeof import('crypto');
   return createHash('sha256').update(randomBytes(32)).digest('hex');
 }
