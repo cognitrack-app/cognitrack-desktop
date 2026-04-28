@@ -40,6 +40,8 @@ export class ActiveWindowTracker {
   private lastAppId: string | null = null;
   private lastSwitchTs = Date.now();
   private running = false;
+  /** True while we are already in an idle/break state — prevents duplicate SQLite rows. */
+  private isIdle = false;
 
   constructor(private readonly store: SQLiteStore) {}
 
@@ -115,7 +117,10 @@ export class ActiveWindowTracker {
     const rawName = result.owner?.name ?? '';
     if (!rawName) return;
 
-    const appId = normalizeAppId(rawName, 'win32');
+    // Use the actual runtime platform so macOS app names resolve via MAC_APP_MAP
+    // instead of falling through to win.unknown.* on every poll tick.
+    const platform = process.platform === 'darwin' ? 'darwin' : 'win32';
+    const appId = normalizeAppId(rawName, platform);
     const category = resolveCategory(appId);
     const now = Date.now();
 
@@ -134,6 +139,8 @@ export class ActiveWindowTracker {
 
       this.lastAppId = appId;
       this.lastSwitchTs = now;
+      // Returning from idle — clear the guard so the next break is recorded.
+      this.isIdle = false;
     }
   }
 
@@ -144,6 +151,12 @@ export class ActiveWindowTracker {
   };
 
   private recordBreak(): void {
+    // Guard: only insert ONE idle event per continuous idle session.
+    // poll() calls this every 5 s while idleSeconds >= threshold; without
+    // this check a 10-min break would generate ~120 duplicate SQLite rows.
+    if (this.isIdle) return;
+    this.isIdle = true;
+
     const now = Date.now();
     this.store.insertEvent({
       timestamp: now,

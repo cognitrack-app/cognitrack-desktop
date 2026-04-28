@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"tsc -p tsconfig.json --watch\" \"electron .\"",
     "build": "tsc -p tsconfig.json && vite build",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "pack": "electron-builder --dir --x64",
+    "pack:arm64": "electron-builder --dir --arm64",
+    "dist": "electron-builder --x64",
+    "dist:arm64": "electron-builder --arm64",
+    "dist:all": "electron-builder --x64 --arm64",
     "rebuild-natives": "electron-rebuild -f -w better-sqlite3,active-win"
   },
   "dependencies": {
@@ -22,6 +25,7 @@
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.3.0",
     "@electron/rebuild": "^3.6.0",
     "@fontsource/inter": "^5.2.8",
     "@types/better-sqlite3": "^7.6.8",

@@ -179,7 +179,7 @@ export class SQLiteStore {
 
     const rows = this.db.prepare(`
       SELECT
-        CAST((timestamp / 3600000) AS INTEGER) % 24 AS hour,
+        CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
         COUNT(*) AS switches
       FROM app_events
       WHERE timestamp >= ? AND timestamp < ? AND eventType = 'switch'
@@ -258,14 +258,14 @@ export class SQLiteStore {
   }
 
   /** Returns parsed daily_metrics for today as a CognitiveSession array for IPC. */
-  getTodaysSessions(userId: string): DailyMetricsRow[] {
+  getTodaysSessions(_userId: string): DailyMetricsRow[] {
     const today = new Date().toISOString().split('T')[0]!;
     const row = this.getDailyMetrics(today);
     return row ? [row] : [];
   }
 
   /** Returns 24-element hourly load array for a given date, for the chart IPC handler. */
-  getHourlyBreakdown(userId: string, date: string): { hour: number; debt: number }[] {
+  getHourlyBreakdown(_userId: string, date: string): { hour: number; debt: number }[] {
     const row = this.getDailyMetrics(date);
     if (!row) return [];
     const hourly = JSON.parse(row.hourlyLoad) as number[];
@@ -273,7 +273,7 @@ export class SQLiteStore {
   }
 
   /** Returns top apps by durationMs for a given date, derived from app_events. */
-  getMostUsedApps(userId: string, date: string): { appId: string; appName: string; duration: number }[] {
+  getMostUsedApps(_userId: string, date: string): { appId: string; appName: string; duration: number }[] {
     const start = new Date(date); start.setHours(0, 0, 0, 0);
     const end   = new Date(start); end.setDate(end.getDate() + 1);
     const rows = this.db.prepare(`
@@ -292,7 +292,7 @@ export class SQLiteStore {
   }
 
   /** Returns daily_metrics rows for a date range [from, to] inclusive. */
-  getSessionsInRange(userId: string, from: string, to: string): DailyMetricsRow[] {
+  getSessionsInRange(_userId: string, from: string, to: string): DailyMetricsRow[] {
     return this.db.prepare(
       `SELECT * FROM daily_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC`
     ).all(from, to) as DailyMetricsRow[];
