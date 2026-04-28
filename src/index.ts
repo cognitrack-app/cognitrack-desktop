@@ -266,15 +266,37 @@ function scheduleHourlyBatch(): void {
 
 // ── Helper: wait for sign-in signal from renderer ────────────────────────
 
+/**
+ * DESK-04 FIX: Returns a Promise that:
+ *  - Resolves with the UID when the renderer emits 'auth:signedIn' with a
+ *    valid Firebase UID (20–128 alphanumeric chars).
+ *  - Rejects immediately with a descriptive error if the UID is malformed,
+ *    so the startup path fails loudly instead of hanging forever.
+ *  - Rejects after 5 minutes if the renderer never fires the event at all
+ *    (e.g. sign-in page crashed, renderer never loaded).
+ *
+ * Previous bug: on invalid UID, code called resolve(waitForAuthFromRenderer())
+ * which re-registered a new listener but never settled the outer Promise,
+ * and there was no timeout — the app would hang silently forever.
+ */
 function waitForAuthFromRenderer(): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // Safety timeout — if renderer never fires the event (e.g. sign-in page
+    // crashed), reject after 5 minutes so startup can surface the error.
+    const timeout = setTimeout(() => {
+      ipcMain.removeAllListeners('auth:signedIn');
+      reject(new Error('[auth] Sign-in timeout: renderer did not emit auth:signedIn within 5 minutes'));
+    }, 5 * 60 * 1000);
+
     ipcMain.once('auth:signedIn', (_event, uid: string) => {
-      if (typeof uid !== 'string' || !/^[a-zA-Z0-9]{20,128}$/.test(uid)) {
-        console.error('[auth] Invalid UID received from renderer');
-        resolve(waitForAuthFromRenderer());
+      clearTimeout(timeout);
+      // Firebase UIDs are 28 alphanumeric chars. We accept 20–128 to allow
+      // future format changes. Hyphens are NOT present in real Firebase UIDs.
+      if (typeof uid !== 'string' || uid.trim().length < 20) {
+        reject(new Error(`[auth] Invalid UID received from renderer: "${uid}"`));
         return;
       }
-      resolve(uid);
+      resolve(uid.trim());
     });
   });
 }

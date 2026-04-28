@@ -4,6 +4,7 @@ import type { BrowserWindow } from 'electron';
 import type { SQLiteStore } from './sqliteStore';
 import type { SyncEngine } from '@cognitrack/sync-engine';
 import { getTodayDateString } from './utils';
+import { extractBreakEvents } from './breakExtractor';
 
 /**
  * BatchProcessor
@@ -51,25 +52,39 @@ export async function processBatch(
   }
 
   const totalDuration = Object.values(durationByCategory).reduce((a, b) => a + b, 0) || 1;
+  // Bug 10 fix: use floor for the first four categories, then let the last
+  // category absorb the rounding remainder so the sum is always exactly 100.
+  const _productive    = Math.floor(((durationByCategory['productive']    ?? 0) / totalDuration) * 100);
+  const _tools         = Math.floor(((durationByCategory['tools']         ?? 0) / totalDuration) * 100);
+  const _social        = Math.floor(((durationByCategory['social']        ?? 0) / totalDuration) * 100);
+  const _entertainment = Math.floor(((durationByCategory['entertainment'] ?? 0) / totalDuration) * 100);
   const categoryBreakdown: DesktopCategoryBreakdown = {
-    productive:    Math.round(((durationByCategory['productive'] ?? 0) / totalDuration) * 100),
-    tools:         Math.round(((durationByCategory['tools']      ?? 0) / totalDuration) * 100),
-    social:        Math.round(((durationByCategory['social']     ?? 0) / totalDuration) * 100),
-    entertainment: Math.round(((durationByCategory['entertainment'] ?? 0) / totalDuration) * 100),
-    passiveWaste:  Math.round(((durationByCategory['passiveWaste']  ?? 0) / totalDuration) * 100),
+    productive:    _productive,
+    tools:         _tools,
+    social:        _social,
+    entertainment: _entertainment,
+    passiveWaste:  100 - _productive - _tools - _social - _entertainment,
   };
 
   const switchEvents   = rawEvents.filter(e => e.eventType === 'switch');
   const totalSwitches  = switchEvents.length;
   const totalFocusedTime = totalFocusedMs / 3_600_000; // convert ms → hours
 
-  // Peak switch velocity: max switches in any single hour
-  const hourlySwitches = new Array(24).fill(0) as number[];
-  for (const e of switchEvents) {
-    const hour = new Date(e.timestamp).getHours();
-    hourlySwitches[hour]++;
+  // Peak switch velocity: max rate in any 5-min sliding window (switches/min).
+  // O(n) two-pointer: left pointer expires events that fall outside the window,
+  // right pointer advances through every switch event exactly once.
+  // Equivalent to the O(n²) filter approach but avoids 250,000+ iterations
+  // on heavy days (500 switches → old: 250k ops, new: 500 ops).
+  let switchVelocityPeak = 0;
+  let left = 0;
+  for (let right = 0; right < switchEvents.length; right++) {
+    const windowStart = switchEvents[right]!.timestamp - 5 * 60_000;
+    // Advance left until all remaining events are within the 5-min window
+    while ((switchEvents[left]?.timestamp ?? 0) < windowStart) left++;
+    const countInWindow = right - left + 1;
+    const rate = countInWindow / 5; // switches per minute
+    if (rate > switchVelocityPeak) switchVelocityPeak = rate;
   }
-  const switchVelocityPeak = Math.max(...hourlySwitches);
 
   // ── Persist computed metrics to SQLite daily_metrics table ────────────
   store.upsertDailyMetrics({
@@ -98,6 +113,11 @@ export async function processBatch(
   }
 
   // ── Build Firestore payload (11 scalars, zero raw data) ───────────────
+  // Extract real break events from idle markers in today's event stream.
+  // extractBreakEvents() uses report.hourlyDebt to populate debt_before/after
+  // and drops micro-pauses < 5 min (those are attention shifts, not breaks).
+  const break_events = extractBreakEvents(rawEvents, report.hourlyDebt);
+
   const payload: DesktopSyncPayload = {
     deviceId,
     agentType:           'desktop',
@@ -112,6 +132,7 @@ export async function processBatch(
     categoryBreakdown,
     peakLoadHour:        report.peakLoadHour,
     hourlyLoad:          report.hourlyDebt,
+    break_events,
     lastUpdated:         new Date().toISOString(),
   };
 

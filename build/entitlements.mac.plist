@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Required for Electron hardened runtime (V8 JIT) -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <!-- Electron requires unsigned executable memory for its renderer -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- Needed for native addons (better-sqlite3, active-win) loaded at runtime -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- active-win uses Apple Events to query the frontmost application name -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

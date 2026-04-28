@@ -1,5 +1,6 @@
 # CogniTrack Desktop — electron-builder configuration
-# Produces: NSIS installer (.exe) + portable exe for Windows
+# Produces: NSIS installer (.exe) + portable exe for Windows (x64 + arm64)
+#           DMG + ZIP for macOS (Intel + Apple Silicon)
 
 appId: com.cognitrack.desktop
 productName: CogniTrack
@@ -25,6 +26,7 @@ extraResources:
     filter:
       - '**/*.png'
       - '**/*.ico'
+      - '**/*.icns'
 
 # ── Windows targets ──────────────────────────────────────────────────
 
@@ -34,11 +36,28 @@ win:
   # asInvoker = no UAC elevation prompt on launch
   # This is intentional — CogniTrack never needs admin rights
   requestedExecutionLevel: asInvoker
+
+  # BUG-W6 FIX: include ${arch} in the artifact name so x64 and arm64
+  # installers are written to distinct filenames and never overwrite each other.
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+
+  # BUG-W2 FIX: arch MUST be declared at the platform level, not inside each
+  # target object. In electron-builder ^24.x the resolution order is:
+  #   CLI flag → platform-level arch → target-level arch → host default
+  # Without a platform-level declaration and an explicit CLI flag, a 32-bit
+  # host Node process arch wins over the target-level [x64] hint, producing
+  # ia32 native modules and/or a downgraded Electron host.
+  #
+  # BUG-W3 FIX: add arm64 so the app runs natively (not under x64 emulation)
+  # on Qualcomm Snapdragon X / X Elite Windows devices. Electron 30 and both
+  # better-sqlite3 and active-win fully support Windows ARM64.
+  arch:
+    - x64
+    - arm64
+
   target:
     - target: nsis        # Full installer with uninstaller
-      arch: [x64]
     - target: portable    # Single .exe, no install needed
-      arch: [x64]
 
 # ── NSIS installer options ────────────────────────────────────────────
 
@@ -52,18 +71,61 @@ nsis:
   # Install per-user by default (no admin required)
   perMachine: false
 
+# ── macOS targets ─────────────────────────────────────────────────────
+
+mac:
+  # 512x512 .icns — generate from build/icon.png with:
+  #   mkdir icon.iconset && sips -z <N> <N> icon.png --out icon.iconset/icon_<N>x<N>.png
+  #   iconutil -c icns icon.iconset -o build/icon.icns
+  icon: build/icon.icns
+  category: public.app-category.productivity
+  # Hardened runtime is required for notarization on macOS 10.15+
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements:        build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - target: dmg      # Drag-to-Applications installer
+      arch: [x64, arm64]
+    - target: zip      # Bare zip for direct download / auto-updater
+      arch: [x64, arm64]
+
+dmg:
+  title: CogniTrack
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# ── Notarization hook (runs after code-signing) ──────────────────────
+# Requires APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID in env.
+# Script is a no-op when APPLE_ID is unset (local dev builds).
+afterSign: scripts/notarize.js
+
 # ── Native modules (better-sqlite3 / active-win need rebuilding) ───────
 
 asar: true
 asarUnpack:
-  # Native .node binaries cannot be inside an asar archive
+  # Native .node binaries cannot execute inside an asar archive
   - '**/*.node'
+  # BUG-W7 FIX: active-win v8 on Windows shells out to a pre-built .exe
+  # helper (WinRT bridge) for foreground window access. Executables inside
+  # an asar archive cannot be launched by the OS — they must be unpacked.
+  - '**/*.exe'
   - '**/node_modules/better-sqlite3/**'
   - '**/node_modules/active-win/**'
 
 # ── Rebuild native modules against Electron's Node version ────────────
 
-beforePackHook: node scripts/rebuild-natives.js
+# Valid hook key for electron-builder 24.x.
+# Hook scripts must export module.exports = async function(context){}.
+# The previous key 'beforePackHook' is not a valid electron-builder key
+# and was silently ignored — the rebuild script never ran during packaging.
+beforePack: scripts/rebuild-natives.js
 
 # ── Auto-updater (future) ────────────────────────────────────────────
 

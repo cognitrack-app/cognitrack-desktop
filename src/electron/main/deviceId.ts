@@ -12,7 +12,9 @@ const CACHE_FILE = 'device-id.txt';
  * Strategy:
  *   1. Read from userData cache (fastest path — avoids shelling out on every launch)
  *   2. macOS: `system_profiler SPHardwareDataType` for the Hardware UUID
- *      Windows: PowerShell `Get-WmiObject Win32_ComputerSystemProduct` for the GUID
+ *      Windows: PowerShell `Get-CimInstance Win32_ComputerSystemProduct` for the GUID
+ *              (Get-CimInstance is the modern replacement for the deprecated Get-WmiObject,
+ *               which was removed in Windows 11 24H2 / PowerShell 7+ default installations)
  *   3. SHA-256 hash the GUID so the raw hardware ID never leaves the machine
  *   4. Persist the hash to userData so the shell command only ever runs once
  *
@@ -28,27 +30,40 @@ export function getDeviceId(): string {
     if (cached.length === 64) return cached; // valid SHA-256 hex
   }
 
-  const deviceId = computeDeviceId();
-  // Persist so wmic is never called again
+  const deviceId = computeDeviceId(cachePath);
+
+  // Persist so the hardware query only runs once per machine.
+  // BUG-W4 FIX: log loudly on failure instead of silently swallowing the
+  // error — a silent failure here means every subsequent launch generates a
+  // new random device ID, accumulating phantom device registrations in Firestore.
   try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
     fs.writeFileSync(cachePath, deviceId, { encoding: 'utf-8' });
   } catch (err) {
-    // Non-fatal: we still return the freshly computed ID this session
-    console.warn('[deviceId] Could not persist device ID cache:', err);
+    console.error(
+      '[deviceId] CRITICAL: Could not persist device ID cache. ' +
+      'The device will re-register on every launch until this is resolved.',
+      err
+    );
   }
 
   return deviceId;
 }
 
-function computeDeviceId(): string {
+function computeDeviceId(cachePath: string): string {
   try {
     if (process.platform === 'darwin') {
-      const raw = execSync("system_profiler SPHardwareDataType | awk '/Hardware UUID/ {print $3}'", { encoding: 'utf-8', timeout: 3000 });
+      const raw = execSync(
+        "system_profiler SPHardwareDataType | awk '/Hardware UUID/ {print $3}'",
+        { encoding: 'utf-8', timeout: 3000 }
+      );
       return createHash('sha256').update(raw.trim()).digest('hex');
     }
 
-    // The modern way to get the hardware GUID on Windows is via PowerShell WMI.
-    // 'wmic' and 'Get-WmiObject' are deprecated and removed from some Windows 11 builds.
+    // BUG-W5 FIX: Use Get-CimInstance, the modern PowerShell cmdlet that
+    // supersedes the deprecated Get-WmiObject. Get-WmiObject was removed
+    // from Windows 11 24H2 and PowerShell 7+ default installations.
+    // Get-CimInstance is available from PowerShell 3.0 through 7.x.
     const raw = execSync(
       'powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"',
       { encoding: 'utf-8', timeout: 4000, windowsHide: true }
@@ -60,21 +75,43 @@ function computeDeviceId(): string {
       return createHash('sha256').update(guid).digest('hex');
     }
 
-    // GUID was invalid or a placeholder — fall through to random ID
-    console.warn('[deviceId] wmic returned an invalid UUID, using stable random fallback');
+    // GUID was invalid or a placeholder — fall through to stable random fallback
+    console.warn('[deviceId] PowerShell returned an invalid UUID, using stable random fallback');
   } catch (err) {
-    // wmic not available or timed out (rare on modern Windows)
-    console.warn('[deviceId] wmic failed:', err);
+    // PowerShell not available or timed out — fall through to stable random fallback
+    console.warn('[deviceId] PowerShell hardware UUID query failed:', err);
   }
 
-  return generateStableFallbackId();
+  return generateStableFallbackId(cachePath);
 }
 
 /**
- * Generates a stable random ID using crypto.randomBytes.
- * Only used when the hardware GUID is unavailable or returns a placeholder.
- * The result is cached to userData on the caller side so this only runs once.
+ * BUG-W4 FIX: Generates (or recovers) a stable random device ID.
+ *
+ * The previous version always generated a fresh random hash, which means
+ * a failed cache write caused a new device ID on every launch — accumulating
+ * phantom device registrations in Firestore without limit.
+ *
+ * This version reads the cache file first. If a valid 64-char hash already
+ * exists there (written by a previous launch that failed after computing but
+ * before the caller could return), it reuses it rather than generating new
+ * random bytes. Only when no cached value exists does it generate a new ID.
+ *
+ * @param cachePath - path to the userData cache file, used to attempt recovery
  */
-function generateStableFallbackId(): string {
+function generateStableFallbackId(cachePath: string): string {
+  // Attempt to recover a previously generated (but not-yet-returned) fallback
+  // from the cache file. This closes the window where the file was written by
+  // generateStableFallbackId but then the outer writeFileSync failed — without
+  // this check the next launch would generate yet another new random ID.
+  try {
+    if (fs.existsSync(cachePath)) {
+      const existing = fs.readFileSync(cachePath, 'utf-8').trim();
+      if (existing.length === 64) return existing;
+    }
+  } catch (_) {
+    // Read failed — generate a fresh ID below
+  }
+
   return createHash('sha256').update(randomBytes(32)).digest('hex');
 }
