@@ -51,13 +51,11 @@ win:
   # BUG-W3 FIX: add arm64 so the app runs natively (not under x64 emulation)
   # on Qualcomm Snapdragon X / X Elite Windows devices. Electron 30 and both
   # better-sqlite3 and active-win fully support Windows ARM64.
-  arch:
-    - x64
-    - arm64
-
   target:
     - target: nsis        # Full installer with uninstaller
+      arch: [x64, arm64]
     - target: portable    # Single .exe, no install needed
+      arch: [x64, arm64]
 
 # ── NSIS installer options ────────────────────────────────────────────
 

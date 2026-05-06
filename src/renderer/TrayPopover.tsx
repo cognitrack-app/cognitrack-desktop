@@ -1,4 +1,5 @@
 import React from 'react';
+import type { MobileData } from '../electron/preload/index';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,10 +18,14 @@ interface TrayStats {
 }
 
 interface TrayPopoverProps {
-  stats:    TrayStats;
-  loaded:   boolean;
-  onPause:  () => void;
-  onResume: () => void;
+  stats:          TrayStats;
+  loaded:         boolean;
+  onPause:        () => void;
+  onResume:       () => void;
+  /** HIGH-9: Phone metrics fetched from Firestore. Null if not yet available. */
+  mobileData:     MobileData | null;
+  mobileSyncing:  boolean;
+  onSyncMobile:   () => void;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -56,13 +61,23 @@ function syncDotClass(sync: TrayStats['syncStatus']): string {
 // ── Component ────────────────────────────────────────────────────────────────
 
 /**
- * TrayPopover — the ONLY screen in the desktop client.
+ * TrayPopover — the main screen in the desktop client.
  *
- * 260×200px frameless window. Shows 3 key metrics at a glance,
- * a sync indicator, and pause/resume + quit controls.
- * All dashboard and history UI lives on the mobile app.
+ * 260×280px frameless window. Shows desktop metrics, a Firestore sync
+ * indicator, mobile data snapshot (HIGH-9), and pause/resume controls.
+ * All detailed history UI lives on the mobile app.
  */
-export function TrayPopover({ stats, loaded, onPause, onResume }: TrayPopoverProps) {
+export function TrayPopover({
+  stats,
+  loaded,
+  onPause,
+  onResume,
+  mobileData,
+  mobileSyncing,
+  onSyncMobile,
+}: TrayPopoverProps) {
+  const hasMobileData = mobileData !== null && typeof mobileData === 'object';
+
   return (
     <div className="popover" id="tray-popover">
       {/* ── Header ──────────────────────────────────────────────────── */}
@@ -89,7 +104,7 @@ export function TrayPopover({ stats, loaded, onPause, onResume }: TrayPopoverPro
       {/* ── Divider ─────────────────────────────────────────────────── */}
       <div className="popover__divider" />
 
-      {/* ── Stats ───────────────────────────────────────────────────── */}
+      {/* ── Desktop stats ────────────────────────────────────────────── */}
       {!loaded ? (
         <div className="popover__loading">Loading…</div>
       ) : (
@@ -110,6 +125,56 @@ export function TrayPopover({ stats, loaded, onPause, onResume }: TrayPopoverPro
           />
         </div>
       )}
+
+      {/* ── Mobile data (HIGH-9) ──────────────────────────────────────── */}
+      <div className="popover__divider" />
+      <div className="popover__mobile" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <div className="popover__mobile-header">
+          <span className="popover__mobile-label">
+            📱 Phone today
+          </span>
+          <button
+            id="btn-sync-mobile"
+            className="popover__btn popover__btn--ghost"
+            onClick={onSyncMobile}
+            disabled={mobileSyncing}
+            title="Sync with phone"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            {mobileSyncing ? '⟳' : '↻'}
+          </button>
+        </div>
+        {mobileSyncing ? (
+          <div className="popover__mobile-value" style={{ color: 'var(--text-muted)' }}>Syncing…</div>
+        ) : hasMobileData ? (
+          <div style={{ display: 'flex', gap: '12px' }}>
+            {typeof mobileData!.cognitiveLoadPct === 'number' && (
+              <div className="popover__mobile-stat">
+                <span className="popover__mobile-val" style={{ color: loadColor(mobileData!.cognitiveLoadPct as number) }}>
+                  {Math.round(mobileData!.cognitiveLoadPct as number)}%
+                </span>
+                <span className="popover__mobile-key">load</span>
+              </div>
+            )}
+            {typeof mobileData!.totalScreenTimeMin === 'number' && (
+              <div className="popover__mobile-stat">
+                <span className="popover__mobile-val">
+                  {Math.round((mobileData!.totalScreenTimeMin as number) / 60 * 10) / 10}h
+                </span>
+                <span className="popover__mobile-key">screen</span>
+              </div>
+            )}
+            {typeof mobileData!.appSwitches === 'number' && (
+              <div className="popover__mobile-stat">
+                <span className="popover__mobile-val">{mobileData!.appSwitches as number}</span>
+                <span className="popover__mobile-key">switches</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="popover__mobile-value" style={{ color: 'var(--text-muted)' }}>No phone data today</div>
+        )}
+      </div>
 
       {/* ── Divider ─────────────────────────────────────────────────── */}
       <div className="popover__divider" />

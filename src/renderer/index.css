@@ -18,6 +18,9 @@
   --color-danger:  #FF6B6B;
   --color-off:     #444;
 
+  /* Aliases used by SignInPopover and other components */
+  --color-border:  rgba(255, 255, 255, 0.12);  /* matches --border but with slightly more opacity for form inputs */
+
   --accent-start:  #6C5CE7;
   --accent-end:    #00CEC9;
 
@@ -262,3 +265,83 @@ html, body {
 .popover__btn--secondary:active {
   transform: translateY(0);
 }
+
+/* ── Ghost button (sync icon) ──────────────────────────────────────────── */
+
+.popover__btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.2s ease, transform 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+.popover__btn--ghost:hover {
+  color: var(--text-primary);
+  transform: rotate(30deg);
+}
+
+.popover__btn--ghost:disabled {
+  opacity: 0.4;
+  cursor: default;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Mobile sync section (HIGH-9) ──────────────────────────────────────── */
+
+.popover__mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+}
+
+.popover__mobile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.popover__mobile-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.popover__mobile-value {
+  font-size: 12px;
+}
+
+.popover__mobile-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.popover__mobile-val {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.popover__mobile-key {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+

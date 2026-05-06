@@ -3,6 +3,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '@cognitrack/api-client';
 import { TrayPopover } from './TrayPopover';
 import { SignInPopover } from './SignInPopover';
+import type { MobileData } from '../electron/preload/index';
 
 interface TrayStats {
   isTracking:          boolean;
@@ -31,13 +32,16 @@ const EMPTY_STATS: TrayStats = {
  *
  * - Polls tray:getStats every 30 s as a fallback
  * - Listens for real-time tray:statsUpdate pushed after each batch
+ * - On mount (after auth), fetches mobile data from Firestore once
  * - Renders the single TrayPopover screen
  */
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [stats, setStats] = useState<TrayStats>(EMPTY_STATS);
-  const [loaded, setLoaded] = useState(false);
+  const [authChecked, setAuthChecked]         = useState(false);
+  const [stats, setStats]                     = useState<TrayStats>(EMPTY_STATS);
+  const [loaded, setLoaded]                   = useState(false);
+  const [mobileData, setMobileData]           = useState<MobileData | null>(null);  // HIGH-9
+  const [mobileSyncing, setMobileSyncing]     = useState(false);                   // HIGH-9
 
   // Fetch stats from main process
   const fetchStats = useCallback(async () => {
@@ -50,6 +54,19 @@ export default function App() {
       console.error('[popover] Failed to fetch stats:', err);
     }
   }, [isAuthenticated]);
+
+  // HIGH-9: Fetch mobile (phone) data from Firestore
+  const fetchMobileData = useCallback(async () => {
+    setMobileSyncing(true);
+    try {
+      const data = await window.electronAPI.syncMobileData();
+      setMobileData(data);
+    } catch (err) {
+      console.error('[popover] Failed to fetch mobile data:', err);
+    } finally {
+      setMobileSyncing(false);
+    }
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -69,6 +86,9 @@ export default function App() {
     // Initial fetch
     fetchStats();
 
+    // HIGH-9: Fetch mobile data once on sign-in (non-blocking)
+    fetchMobileData();
+
     // Poll every 30 seconds as a heartbeat
     const interval = setInterval(fetchStats, 30_000);
 
@@ -82,7 +102,7 @@ export default function App() {
       clearInterval(interval);
       cleanup();
     };
-  }, [fetchStats, isAuthenticated]);
+  }, [fetchStats, fetchMobileData, isAuthenticated]);
 
   // Pause / resume handlers
   const handlePause = useCallback(async () => {
@@ -113,6 +133,9 @@ export default function App() {
       loaded={loaded}
       onPause={handlePause}
       onResume={handleResume}
+      mobileData={mobileData}
+      mobileSyncing={mobileSyncing}
+      onSyncMobile={fetchMobileData}
     />
   );
 }
