@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"tsc -p tsconfig.json --watch\" \"electron .\"",
     "build": "tsc -p tsconfig.json && vite build",
+    "postinstall": "electron-rebuild -f -w better-sqlite3,active-win",
     "pack": "electron-builder --dir --x64",
     "pack:arm64": "electron-builder --dir --arm64",
     "dist": "electron-builder --x64",
@@ -21,6 +22,7 @@
     "better-sqlite3": "^9.4.3",
     "dotenv": "^16.4.5",
     "electron-updater": "^6.1.7",
+    "firebase": "10.8.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

@@ -3,6 +3,7 @@ import type { AppEvent, DesktopSyncPayload, DesktopCategoryBreakdown } from '@co
 import type { BrowserWindow } from 'electron';
 import type { SQLiteStore } from './sqliteStore';
 import type { SyncEngine } from '@cognitrack/sync-engine';
+import type { ActiveWindowTracker } from './activeWindowTracker';
 import { getTodayDateString } from './utils';
 import { extractBreakEvents } from './breakExtractor';
 
@@ -27,6 +28,11 @@ export async function processBatch(
   userId: string,
   deviceId: string,
   mainWindow?: BrowserWindow | null,
+  // FIX (HIGH-7): tracker is now required to read isRunning() for the
+  // live stats push. Previously isTracking was hardcoded to `true`, which
+  // caused the tray UI to revert to "tracking active" after every hourly
+  // batch even when the user had paused tracking.
+  tracker?: ActiveWindowTracker | null,
   date = getTodayDateString(),
 ): Promise<void> {
   const rawEvents: AppEvent[] = store.getEventsForDate(date);
@@ -104,7 +110,10 @@ export async function processBatch(
   // ── Push live stats update to the tray popover ────────────────────────
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('tray:statsUpdate', {
-      isTracking:          true,
+      // FIX (HIGH-7): was hardcoded `isTracking: true`. The tracker can be
+      // paused by the user at any time; hardcoding true caused the pause
+      // button to reappear after every hourly batch even when stopped.
+      isTracking:          tracker?.isRunning() ?? false,
       cognitiveLoadPct:    report.cognitiveLoadPct,
       totalSwitches,
       wmCapacityRemaining: report.wmCapacityRemaining,

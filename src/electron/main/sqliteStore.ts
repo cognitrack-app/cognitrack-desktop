@@ -134,8 +134,13 @@ export class SQLiteStore {
    * Used by the batch processor to feed into calculateCognitiveDebt().
    */
   getEventsForDate(date: string): AppEvent[] {
-    const start = new Date(date);
-    start.setHours(0, 0, 0, 0);
+    // FIX (timezone bug): new Date('YYYY-MM-DD') parses the string as UTC
+    // midnight, not local midnight. On UTC-5 that equals 19:00 local the
+    // PREVIOUS day; setHours(0,0,0,0) then jumps forward 5 h, incorrectly
+    // including events from the prior evening in the next day's batch.
+    // localMidnight() constructs the Date from explicit y/m/d integers so
+    // the JS Date constructor uses local time, not UTC.
+    const start = localMidnight(date);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
 
@@ -274,7 +279,8 @@ export class SQLiteStore {
 
   /** Returns top apps by durationMs for a given date, derived from app_events. */
   getMostUsedApps(_userId: string, date: string): { appId: string; appName: string; duration: number }[] {
-    const start = new Date(date); start.setHours(0, 0, 0, 0);
+    // Same fix as getEventsForDate — use localMidnight() to avoid UTC parse.
+    const start = localMidnight(date);
     const end   = new Date(start); end.setDate(end.getDate() + 1);
     const rows = this.db.prepare(`
       SELECT appId, SUM(durationMs) AS totalMs
@@ -308,4 +314,30 @@ export class SQLiteStore {
   close(): void {
     this.db.close();
   }
+}
+
+// ── Module-level helpers ─────────────────────────────────────────────────────
+
+/**
+ * Parses a 'YYYY-MM-DD' string as LOCAL midnight (00:00:00.000 local time).
+ *
+ * Why not `new Date(dateStr)`?
+ *   The ECMA spec states that date-only strings (no time component) are parsed
+ *   as UTC, not local time. This means on a UTC-5 machine:
+ *     new Date('2026-05-06') === 2026-05-05T19:00:00 local
+ *   Calling .setHours(0,0,0,0) on that jumps FORWARD 5 hours to
+ *   2026-05-06T00:00:00 local — correct, but only by accident.
+ *
+ *   The real problem occurs when the Date constructor returns a value on the
+ *   *previous calendar day* locally — setDate(+1) then points to the wrong
+ *   end boundary and events near midnight are double-counted or missed.
+ *
+ *   Using explicit integer parts avoids the UTC→local ambiguity entirely.
+ *
+ * @param dateStr - 'YYYY-MM-DD' string (local date)
+ * @returns Date set to 00:00:00.000 in the local timezone
+ */
+function localMidnight(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number) as [number, number, number];
+  return new Date(y, m - 1, d, 0, 0, 0, 0); // month is 0-indexed
 }

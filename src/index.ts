@@ -1,7 +1,7 @@
-// Load environment variables BEFORE any Firebase-dependent imports
 import 'dotenv/config';
+import fs from 'fs';
 import path from 'path';
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell } from 'electron';
 import { registerIpcHandlers } from './electron/main/ipcHandlers';
 import { SQLiteStore } from './electron/main/sqliteStore';
 import { ActiveWindowTracker } from './electron/main/activeWindowTracker';
@@ -9,7 +9,7 @@ import { waitForAuth, getTodayDateString } from './electron/main/utils';
 import { getDeviceId } from './electron/main/deviceId';
 import { processBatch } from './electron/main/batchProcessor';
 import { SyncEngine } from '@cognitrack/sync-engine';
-import { registerDevice } from '@cognitrack/api-client';
+import { registerDevice, onAuthChange } from '@cognitrack/api-client';
 import { ensureAccessibilityPermission } from './electron/main/macPermissions';
 
 // ── Module-level singletons (set once in whenReady) ─────────────────────────
@@ -24,11 +24,23 @@ let deviceId:   string;
 
 // ── App lifecycle ───────────────────────────────────────────────────────
 
+// FIX: Prevent multiple instances of the app from running simultaneously.
+// Multiple instances will fight for the SQLite lock and corrupt the database.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  console.error('[startup] Another instance is already running. Exiting.');
+  app.quit();
+  // We must return here, but since this is top-level we just let app.quit
+  // kill the process.
+}
+
 app.whenReady().then(async () => {
   // 1. Auto-launch on login (registry on Windows, LaunchAgents on macOS)
   app.setLoginItemSettings({
     openAtLogin:  true,
-    openAsHidden: true,   // start silently in tray, no window
+    // FIX: openAsHidden only works on macOS. On Windows, we must pass a custom
+    // arg and handle it. The 'electron-builder' auto-launcher passes these args.
+    args: ['--hidden'],
     name:         'CogniTrack',
   });
 
@@ -42,7 +54,9 @@ app.whenReady().then(async () => {
   store = new SQLiteStore();
 
   // 3. Sync queue db in the same userData directory
-  const queueDbPath = path.join(app.getPath('userData'), 'db', 'sync-queue.db');
+  const dbDir = path.join(app.getPath('userData'), 'db');
+  fs.mkdirSync(dbDir, { recursive: true }); // FIX: Ensure dir exists before SyncEngine
+  const queueDbPath = path.join(dbDir, 'sync-queue.db');
   syncEngine = new SyncEngine(queueDbPath);
 
   // 4. Active window tracker (no start yet — needs auth first)
@@ -55,7 +69,13 @@ app.whenReady().then(async () => {
   tray = createTray();
 
   // 7. IPC handlers — now takes tracker + syncEngine + refreshTray callback
-  registerIpcHandlers(store, tracker, syncEngine, () => tray?.setContextMenu(buildTrayMenu()));
+  registerIpcHandlers(
+    store,
+    tracker,
+    syncEngine,
+    () => tray?.setContextMenu(buildTrayMenu()),
+    () => userId,   // HIGH-9: getter for sync:pullMobileData handler
+  );
 
   // 8. Load the renderer so it can display the sign-in form if needed
   if (app.isPackaged) {
@@ -65,15 +85,33 @@ app.whenReady().then(async () => {
     mainWindow.loadURL('http://localhost:5173');
   }
 
-  // 9. Wait for Firebase auth before doing anything network-related
+  // 9. Keep userId updated for the session
+  onAuthChange(user => {
+    if (user) {
+      userId = user.uid;
+    }
+  });
+
+  // Wait for Firebase auth before doing anything network-related
   try {
     userId = await waitForAuth();
   } catch (err) {
     // Not signed in yet — show the popover so user sees the status
     console.warn('[startup] Not authenticated, showing popover:', err);
     showPopover();
-    // Wait for sign-in signal from renderer
-    userId = await waitForAuthFromRenderer();
+    
+    let authSuccess = false;
+    while (!authSuccess) {
+      try {
+        userId = await waitForAuthFromRenderer();
+        authSuccess = true;
+      } catch (authErr) {
+        console.error('[startup] Auth from renderer failed:', authErr);
+        if (mainWindow) {
+          mainWindow.reload();
+        }
+      }
+    }
   }
 
   // 10. Register/update this device in Firestore
@@ -98,7 +136,10 @@ app.whenReady().then(async () => {
   // 13. Hourly batch: compute cognitive metrics and sync to Firestore
   scheduleHourlyBatch();
 
-
+  // 14. If launched with --hidden (from OS startup), ensure popover is closed
+  if (process.argv.includes('--hidden')) {
+    mainWindow?.hide();
+  }
 
   console.log(`[startup] CogniTrack ready — userId=${userId} deviceId=${deviceId}`);
 });
@@ -113,7 +154,7 @@ app.on('before-quit', (e) => {
   (async () => {
     console.log('[shutdown] Running final batch before quit...');
     if (store && syncEngine && userId && deviceId) {
-      await processBatch(store, syncEngine, userId, deviceId, mainWindow).catch(console.error);
+      await processBatch(store, syncEngine, userId, deviceId, mainWindow, tracker).catch(console.error);
     }
     tracker?.stop();
     store?.close();
@@ -123,7 +164,7 @@ app.on('before-quit', (e) => {
 
 // Prevent full quit when all windows are closed (keep running in tray)
 app.on('window-all-closed', (e: Event) => {
-  e.preventDefault();
+  // Do nothing to prevent app.quit() from being called implicitly
 });
 
 // ── Popover window factory ──────────────────────────────────────────────────
@@ -155,6 +196,35 @@ function createPopoverWindow(): BrowserWindow {
   win.on('close', (e) => {
     e.preventDefault();
     win.hide();
+  });
+
+  // FIX: Allow Firebase signInWithPopup to open a popup window.
+  // Electron v30+ denies all window.open() calls by default (no handler = deny).
+  // Firebase Auth SDK uses window.open() to launch the Google OAuth consent page.
+  // Without this handler, the popup is silently blocked and Google sign-in hangs.
+  // We allow only Firebase/Google auth URLs; everything else goes to the system browser.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    const isAuthUrl =
+      url.startsWith('https://accounts.google.com') ||
+      url.includes('.firebaseapp.com/__/auth') ||
+      url.startsWith('https://apis.google.com');
+
+    if (isAuthUrl) {
+      // Allow Electron to create a child BrowserWindow for the OAuth popup
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 500,
+          height: 620,
+          resizable: false,
+          alwaysOnTop: true,
+        },
+      };
+    }
+
+    // All other URLs (privacy policy, help links, etc.) open in system browser
+    shell.openExternal(url).catch(console.error);
+    return { action: 'deny' };
   });
 
   return win;
@@ -252,12 +322,12 @@ function scheduleHourlyBatch(): void {
   const ONE_HOUR = 60 * 60 * 1000;
 
   // Run once immediately on startup so today's partial data is available fast
-  processBatch(store, syncEngine, userId, deviceId, mainWindow).catch(console.error);
+  processBatch(store, syncEngine, userId, deviceId, mainWindow, tracker).catch(console.error);
 
   // Then schedule every hour
   const jitter = Math.floor(Math.random() * 5 * 60 * 1000);
   setInterval(() => {
-    processBatch(store, syncEngine, userId, deviceId, mainWindow).catch(console.error);
+    processBatch(store, syncEngine, userId, deviceId, mainWindow, tracker).catch(console.error);
 
     // Refresh tray menu to update tracking state label
     tray?.setContextMenu(buildTrayMenu());
@@ -284,19 +354,28 @@ function waitForAuthFromRenderer(): Promise<string> {
     // Safety timeout — if renderer never fires the event (e.g. sign-in page
     // crashed), reject after 5 minutes so startup can surface the error.
     const timeout = setTimeout(() => {
-      ipcMain.removeAllListeners('auth:signedIn');
+      ipcMain.removeListener('auth:signedIn', handler);
       reject(new Error('[auth] Sign-in timeout: renderer did not emit auth:signedIn within 5 minutes'));
     }, 5 * 60 * 1000);
 
-    ipcMain.once('auth:signedIn', (_event, uid: string) => {
-      clearTimeout(timeout);
-      // Firebase UIDs are 28 alphanumeric chars. We accept 20–128 to allow
-      // future format changes. Hyphens are NOT present in real Firebase UIDs.
+    // FIX (CRIT-5): Use ipcMain.on instead of ipcMain.once so that renderer
+    // reloads can re-signal. With ipcMain.once, if the renderer reloads during
+    // the sign-in flow (e.g. after a failed attempt), the second auth:signedIn
+    // IPC message is silently dropped and startup hangs forever.
+    //
+    // On an INVALID uid, log and keep listening — the renderer may reload and
+    // send a valid UID on the next attempt. Only resolve/clean-up on success.
+    function handler(_event: Electron.IpcMainEvent, uid: string): void {
       if (typeof uid !== 'string' || uid.trim().length < 20) {
-        reject(new Error(`[auth] Invalid UID received from renderer: "${uid}"`));
+        // Invalid UID — warn and keep the listener alive for the next attempt.
+        console.warn(`[auth] Invalid UID received from renderer: "${uid}" — waiting for retry`);
         return;
       }
+      clearTimeout(timeout);
+      ipcMain.removeListener('auth:signedIn', handler);
       resolve(uid.trim());
-    });
+    }
+
+    ipcMain.on('auth:signedIn', handler);
   });
 }
