@@ -6,3 +6,4 @@ dist-renderer/
 *.js.map
 .DS_Store
 build_error.log
+build_error.log
