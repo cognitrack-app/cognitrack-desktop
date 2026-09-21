@@ -7,7 +7,7 @@ import type { SQLiteStore } from './sqliteStore';
 import type { Result as ActiveWinResult } from 'active-win';
 
 const POLL_INTERVAL_MS = 5_000; // 5-second poll (PRD spec)
-const IDLE_THRESHOLD_S = 60; // 60s of no input = idle / break
+const IDLE_THRESHOLD_SECONDS = 60; // 60s of no input = idle / break (powerMonitor.getSystemIdleTime() returns seconds)
 
 let activeWin: (() => Promise<ActiveWinResult | undefined>) | null = null;
 
@@ -89,12 +89,31 @@ export class ActiveWindowTracker {
     return this.running;
   }
 
+  /**
+   * Returns diagnostic status for health checks and debugging.
+   */
+  getStatus(): {
+    isRunning: boolean;
+    lastPollTs: number | null;
+    lastAppId: string | null;
+    errorCount: number;
+    pollIntervalMs: number;
+  } {
+    return {
+      isRunning: this.running,
+      lastPollTs: this.lastSwitchTs,
+      lastAppId: this.lastAppId,
+      errorCount: 0, // Could be extended to track actual errors
+      pollIntervalMs: POLL_INTERVAL_MS,
+    };
+  }
+
   // ── Core poll logic ───────────────────────────────────────────────────────
 
   private async poll(): Promise<void> {
     // Check OS-level idle time first — no point querying active window if idle
     const idleSeconds = powerMonitor.getSystemIdleTime();
-    if (idleSeconds >= IDLE_THRESHOLD_S) {
+    if (idleSeconds >= IDLE_THRESHOLD_SECONDS) {
       this.recordBreak();
       return;
     }

@@ -127,7 +127,18 @@ beforePack: scripts/rebuild-natives.js
 
 # ── Auto-updater (future) ────────────────────────────────────────────
 
+# To enable auto-updates:
+# 1. Create a GitHub repo for releases (or use S3/other provider)
+# 2. Set GH_TOKEN secret in CI for electron-builder to publish releases
+# 3. Uncomment and configure the publish section below
+#
 # publish:
 #   provider: github
 #   owner: cognitrack
 #   repo: cognitrack-desktop
+#   private: false
+#   releaseType: release
+#
+# For Windows, the NSIS installer will check for updates on startup.
+# For macOS, the DMG/ZIP will be checked via the Squirrel.Mac-compatible
+# update endpoint (requires notarized builds).

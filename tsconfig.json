@@ -22,6 +22,7 @@
   ],
   "exclude": [
     "src/renderer/**",
+    "src/electron/main/__tests__/**",
     "node_modules",
     "dist-electron",
     "dist-renderer"

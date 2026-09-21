@@ -37,6 +37,46 @@ export interface MobileData {
   [key: string]: unknown;
 }
 
+export interface DiagnosticsStatus {
+  timestamp: string;
+  app: {
+    version: string;
+    platform: string;
+    arch: string;
+    electronVersion: string;
+    nodeVersion: string;
+    uptimeSeconds: number;
+  };
+  system: {
+    platform: string;
+    release: string;
+    arch: string;
+    cpus: number;
+    totalMemoryMB: number;
+    freeMemoryMB: number;
+    loadAvg: number[];
+  };
+  tracker: {
+    isRunning: boolean;
+    lastPollTs: number | null;
+    lastAppId: string | null;
+    errorCount: number;
+    pollIntervalMs: number;
+  };
+  store: {
+    switchCountToday: number;
+    hasTodayMetrics: boolean;
+    dbPath: string;
+  };
+  sync: {
+    pending: number;
+    syncing: number;
+    synced: number;
+    failed: number;
+    total: number;
+  };
+}
+
 export interface ElectronAPI {
   getStats:        () => Promise<TrayStats>;
   pauseTracking:   () => Promise<{ isTracking: boolean }>;
@@ -45,6 +85,8 @@ export interface ElectronAPI {
   signIn:          (uid: string) => void;
   /** HIGH-9: Pull today's (or a given date's) phone metrics from Firestore. */
   syncMobileData:  (date?: string) => Promise<MobileData | null>;
+  /** Diagnostics: Get comprehensive health check status. */
+  getDiagnostics:  () => Promise<DiagnosticsStatus>;
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -65,4 +107,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // HIGH-9: Fetch phone metrics from Firestore for a given date (default: today)
   syncMobileData: (date?: string) => ipcRenderer.invoke('sync:pullMobileData', date),
+
+  // Diagnostics: Get comprehensive health check status
+  getDiagnostics: () => ipcRenderer.invoke('diagnostics:getStatus'),
 } satisfies ElectronAPI);
