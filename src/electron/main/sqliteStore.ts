@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import type { AppEvent, Category, DeviceType } from '@cognitrack/shared';
+import { localMidnight } from '@cognitrack/shared';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,9 +51,25 @@ export interface DailyMetricsRow {
  * Tables:
  *   app_events   — raw tracking events; 7-day TTL enforced by INSERT trigger
  *   daily_metrics — computed 11-scalar summaries ready for Firestore sync
+ *
+ * Prepared statements are cached to avoid re-parsing SQL on every call.
  */
 export class SQLiteStore {
   private db: Database.Database;
+
+  // Cached prepared statements (initialized in initStatements)
+  // Using 'any' for Statement generics to avoid complex better-sqlite3 type issues
+  private stmtInsertEvent!: Database.Statement<any>;
+  private stmtGetEventsForDate!: Database.Statement<any>;
+  private stmtGetSwitchCountToday!: Database.Statement<any>;
+  private stmtGetHourlySwitchesToday!: Database.Statement<any>;
+  private stmtUpsertDailyMetrics!: Database.Statement<any>;
+  private stmtGetDailyMetrics!: Database.Statement<any>;
+  private stmtGetUnsyncedMetrics!: Database.Statement<any>;
+  private stmtMarkSynced!: Database.Statement<any>;
+  private stmtGetMetricsHistory!: Database.Statement<any>;
+  private stmtGetMostUsedApps!: Database.Statement<any>;
+  private stmtGetSessionsInRange!: Database.Statement<any>;
 
   constructor() {
     const userDataPath = app.getPath('userData');
@@ -69,6 +86,91 @@ export class SQLiteStore {
     this.db.pragma('synchronous = NORMAL');
 
     this.init();
+    this.initStatements();
+  }
+
+  private initStatements(): void {
+    this.stmtInsertEvent = this.db.prepare(`
+      INSERT INTO app_events (timestamp, appId, category, eventType, durationMs, deviceType)
+      VALUES (@timestamp, @appId, @category, @eventType, @durationMs, @deviceType)
+    `);
+
+    this.stmtGetEventsForDate = this.db.prepare(`
+      SELECT * FROM app_events
+      WHERE timestamp >= ? AND timestamp < ?
+      ORDER BY timestamp ASC
+    `);
+
+    this.stmtGetSwitchCountToday = this.db.prepare(`
+      SELECT COUNT(*) as count FROM app_events
+      WHERE timestamp >= ? AND eventType = 'switch'
+    `);
+
+    this.stmtGetHourlySwitchesToday = this.db.prepare(`
+      SELECT
+        CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+        COUNT(*) AS switches
+      FROM app_events
+      WHERE timestamp >= ? AND timestamp < ? AND eventType = 'switch'
+      GROUP BY hour
+      ORDER BY hour
+    `);
+
+    this.stmtUpsertDailyMetrics = this.db.prepare(`
+      INSERT INTO daily_metrics (
+        date, cognitiveDebt, cognitiveLoadPct, wmCapacityRemaining,
+        residueAtEOD, totalSwitches, totalFocusedTime, switchVelocityPeak,
+        peakLoadHour, hourlyLoad, categoryBreakdown, synced, updatedAt
+      ) VALUES (
+        @date, @cognitiveDebt, @cognitiveLoadPct, @wmCapacityRemaining,
+        @residueAtEOD, @totalSwitches, @totalFocusedTime, @switchVelocityPeak,
+        @peakLoadHour, @hourlyLoad, @categoryBreakdown, 0, @updatedAt
+      )
+      ON CONFLICT(date) DO UPDATE SET
+        cognitiveDebt       = excluded.cognitiveDebt,
+        cognitiveLoadPct    = excluded.cognitiveLoadPct,
+        wmCapacityRemaining = excluded.wmCapacityRemaining,
+        residueAtEOD        = excluded.residueAtEOD,
+        totalSwitches       = excluded.totalSwitches,
+        totalFocusedTime    = excluded.totalFocusedTime,
+        switchVelocityPeak  = excluded.switchVelocityPeak,
+        peakLoadHour        = excluded.peakLoadHour,
+        hourlyLoad          = excluded.hourlyLoad,
+        categoryBreakdown   = excluded.categoryBreakdown,
+        synced              = 0,
+        updatedAt           = excluded.updatedAt
+    `);
+
+    this.stmtGetDailyMetrics = this.db.prepare(
+      'SELECT * FROM daily_metrics WHERE date = ?'
+    );
+
+    this.stmtGetUnsyncedMetrics = this.db.prepare(
+      `SELECT * FROM daily_metrics WHERE synced = 0 ORDER BY date DESC`
+    );
+
+    this.stmtMarkSynced = this.db.prepare(
+      `UPDATE daily_metrics SET synced = 1, updatedAt = ? WHERE date = ?`
+    );
+
+    this.stmtGetMetricsHistory = this.db.prepare(`
+      SELECT * FROM daily_metrics
+      ORDER BY date DESC
+      LIMIT ?
+    `);
+
+    this.stmtGetMostUsedApps = this.db.prepare(`
+      SELECT appId, SUM(durationMs) AS totalMs
+      FROM app_events
+      WHERE timestamp >= ? AND timestamp < ? AND eventType = 'switch'
+      GROUP BY appId
+      ORDER BY totalMs DESC
+      LIMIT 10
+    `);
+
+    this.stmtGetSessionsInRange = this.db.prepare(
+      `SELECT * FROM daily_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC`
+    );
   }
 
   private init(): void {
@@ -117,16 +219,13 @@ export class SQLiteStore {
 
   // ── Raw Events ─────────────────────────────────────────────────────────────
 
-  /**
+/**
    * Insert a single raw app event.
    * The TTL trigger fires automatically and deletes events older than 7 days.
    * This is the method called by ActiveWindowTracker on every app switch.
    */
   insertEvent(event: RawEventInsert): void {
-    this.db.prepare(`
-      INSERT INTO app_events (timestamp, appId, category, eventType, durationMs, deviceType)
-      VALUES (@timestamp, @appId, @category, @eventType, @durationMs, @deviceType)
-    `).run(event);
+    this.stmtInsertEvent.run(event);
   }
 
   /**
@@ -134,21 +233,11 @@ export class SQLiteStore {
    * Used by the batch processor to feed into calculateCognitiveDebt().
    */
   getEventsForDate(date: string): AppEvent[] {
-    // FIX (timezone bug): new Date('YYYY-MM-DD') parses the string as UTC
-    // midnight, not local midnight. On UTC-5 that equals 19:00 local the
-    // PREVIOUS day; setHours(0,0,0,0) then jumps forward 5 h, incorrectly
-    // including events from the prior evening in the next day's batch.
-    // localMidnight() constructs the Date from explicit y/m/d integers so
-    // the JS Date constructor uses local time, not UTC.
     const start = localMidnight(date);
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
 
-    const rows = this.db.prepare(`
-      SELECT * FROM app_events
-      WHERE timestamp >= ? AND timestamp < ?
-      ORDER BY timestamp ASC
-    `).all(start.getTime(), end.getTime()) as RawEventRow[];
+    const rows = (this.stmtGetEventsForDate as any).all(start.getTime(), end.getTime()) as RawEventRow[];
 
     return rows.map(r => ({
       id: String(r.id),
@@ -165,10 +254,7 @@ export class SQLiteStore {
   getSwitchCountToday(): number {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
-    const row = this.db.prepare(`
-      SELECT COUNT(*) as count FROM app_events
-      WHERE timestamp >= ? AND eventType = 'switch'
-    `).get(start.getTime()) as { count: number };
+    const row = this.stmtGetSwitchCountToday.get(start.getTime()) as { count: number };
     return row.count;
   }
 
@@ -182,15 +268,7 @@ export class SQLiteStore {
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
 
-    const rows = this.db.prepare(`
-      SELECT
-        CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
-        COUNT(*) AS switches
-      FROM app_events
-      WHERE timestamp >= ? AND timestamp < ? AND eventType = 'switch'
-      GROUP BY hour
-      ORDER BY hour
-    `).all(start.getTime(), end.getTime()) as { hour: number; switches: number }[];
+    const rows = (this.stmtGetHourlySwitchesToday as any).all(start.getTime(), end.getTime()) as { hour: number; switches: number }[];
 
     const result = new Array(24).fill(0) as number[];
     for (const row of rows) result[row.hour] = row.switches;
@@ -204,62 +282,29 @@ export class SQLiteStore {
    * Called by the batch processor after running calculateCognitiveDebt().
    */
   upsertDailyMetrics(metrics: Omit<DailyMetricsRow, 'synced' | 'updatedAt'>): void {
-    this.db.prepare(`
-      INSERT INTO daily_metrics (
-        date, cognitiveDebt, cognitiveLoadPct, wmCapacityRemaining,
-        residueAtEOD, totalSwitches, totalFocusedTime, switchVelocityPeak,
-        peakLoadHour, hourlyLoad, categoryBreakdown, synced, updatedAt
-      ) VALUES (
-        @date, @cognitiveDebt, @cognitiveLoadPct, @wmCapacityRemaining,
-        @residueAtEOD, @totalSwitches, @totalFocusedTime, @switchVelocityPeak,
-        @peakLoadHour, @hourlyLoad, @categoryBreakdown, 0, @updatedAt
-      )
-      ON CONFLICT(date) DO UPDATE SET
-        cognitiveDebt       = excluded.cognitiveDebt,
-        cognitiveLoadPct    = excluded.cognitiveLoadPct,
-        wmCapacityRemaining = excluded.wmCapacityRemaining,
-        residueAtEOD        = excluded.residueAtEOD,
-        totalSwitches       = excluded.totalSwitches,
-        totalFocusedTime    = excluded.totalFocusedTime,
-        switchVelocityPeak  = excluded.switchVelocityPeak,
-        peakLoadHour        = excluded.peakLoadHour,
-        hourlyLoad          = excluded.hourlyLoad,
-        categoryBreakdown   = excluded.categoryBreakdown,
-        synced              = 0,
-        updatedAt           = excluded.updatedAt
-    `).run({ ...metrics, updatedAt: Date.now() });
+    this.stmtUpsertDailyMetrics.run({ ...metrics, updatedAt: Date.now() });
   }
 
   /** Fetch daily metrics row for a specific date. Null if not yet computed. */
   getDailyMetrics(date: string): DailyMetricsRow | null {
-    return (this.db.prepare(
-      'SELECT * FROM daily_metrics WHERE date = ?'
-    ).get(date) as DailyMetricsRow | undefined) ?? null;
+    return (this.stmtGetDailyMetrics.get(date) as DailyMetricsRow | undefined) ?? null;
   }
 
   /** Fetch all unsynced daily metrics (synced = 0). */
   getUnsyncedMetrics(): DailyMetricsRow[] {
-    return this.db.prepare(
-      `SELECT * FROM daily_metrics WHERE synced = 0 ORDER BY date DESC`
-    ).all() as DailyMetricsRow[];
+    return (this.stmtGetUnsyncedMetrics as any).all() as DailyMetricsRow[];
   }
 
   /** Mark a date's metrics as successfully synced to Firestore. */
   markSynced(date: string): void {
-    this.db.prepare(
-      `UPDATE daily_metrics SET synced = 1, updatedAt = ? WHERE date = ?`
-    ).run(Date.now(), date);
+    (this.stmtMarkSynced as any).run(Date.now(), date);
   }
 
   /**
    * Fetch last N days of daily metrics for the history chart.
    */
   getMetricsHistory(days = 7): DailyMetricsRow[] {
-    return this.db.prepare(`
-      SELECT * FROM daily_metrics
-      ORDER BY date DESC
-      LIMIT ?
-    `).all(days) as DailyMetricsRow[];
+    return (this.stmtGetMetricsHistory as any).all(days) as DailyMetricsRow[];
   }
 
   /** Returns parsed daily_metrics for today as a CognitiveSession array for IPC. */
@@ -277,19 +322,11 @@ export class SQLiteStore {
     return hourly.map((debt, hour) => ({ hour, debt }));
   }
 
-  /** Returns top apps by durationMs for a given date, derived from app_events. */
+/** Returns top apps by durationMs for a given date, derived from app_events. */
   getMostUsedApps(_userId: string, date: string): { appId: string; appName: string; duration: number }[] {
-    // Same fix as getEventsForDate — use localMidnight() to avoid UTC parse.
     const start = localMidnight(date);
     const end   = new Date(start); end.setDate(end.getDate() + 1);
-    const rows = this.db.prepare(`
-      SELECT appId, SUM(durationMs) AS totalMs
-      FROM app_events
-      WHERE timestamp >= ? AND timestamp < ? AND eventType = 'switch'
-      GROUP BY appId
-      ORDER BY totalMs DESC
-      LIMIT 10
-    `).all(start.getTime(), end.getTime()) as { appId: string; totalMs: number }[];
+    const rows = (this.stmtGetMostUsedApps as any).all(start.getTime(), end.getTime()) as { appId: string; totalMs: number }[];
     return rows.map(r => ({
       appId:    r.appId,
       appName:  r.appId.split('.').slice(1).join('.') || r.appId,
@@ -299,9 +336,7 @@ export class SQLiteStore {
 
   /** Returns daily_metrics rows for a date range [from, to] inclusive. */
   getSessionsInRange(_userId: string, from: string, to: string): DailyMetricsRow[] {
-    return this.db.prepare(
-      `SELECT * FROM daily_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC`
-    ).all(from, to) as DailyMetricsRow[];
+    return (this.stmtGetSessionsInRange as any).all(from, to) as DailyMetricsRow[];
   }
 
   /** Fetch a single daily_metrics row by date (used as getById in IPC). */
@@ -314,30 +349,4 @@ export class SQLiteStore {
   close(): void {
     this.db.close();
   }
-}
-
-// ── Module-level helpers ─────────────────────────────────────────────────────
-
-/**
- * Parses a 'YYYY-MM-DD' string as LOCAL midnight (00:00:00.000 local time).
- *
- * Why not `new Date(dateStr)`?
- *   The ECMA spec states that date-only strings (no time component) are parsed
- *   as UTC, not local time. This means on a UTC-5 machine:
- *     new Date('2026-05-06') === 2026-05-05T19:00:00 local
- *   Calling .setHours(0,0,0,0) on that jumps FORWARD 5 hours to
- *   2026-05-06T00:00:00 local — correct, but only by accident.
- *
- *   The real problem occurs when the Date constructor returns a value on the
- *   *previous calendar day* locally — setDate(+1) then points to the wrong
- *   end boundary and events near midnight are double-counted or missed.
- *
- *   Using explicit integer parts avoids the UTC→local ambiguity entirely.
- *
- * @param dateStr - 'YYYY-MM-DD' string (local date)
- * @returns Date set to 00:00:00.000 in the local timezone
- */
-function localMidnight(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('-').map(Number) as [number, number, number];
-  return new Date(y, m - 1, d, 0, 0, 0, 0); // month is 0-indexed
 }

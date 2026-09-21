@@ -1,5 +1,6 @@
 import { calculateCognitiveDebt, resolveCategory } from '@cognitrack/shared';
 import type { AppEvent, DesktopSyncPayload, DesktopCategoryBreakdown } from '@cognitrack/shared';
+import { SYNC_PAYLOAD_SCHEMA_VERSION } from '@cognitrack/shared';
 import type { BrowserWindow } from 'electron';
 import type { SQLiteStore } from './sqliteStore';
 import type { SyncEngine } from '@cognitrack/sync-engine';
@@ -143,6 +144,7 @@ export async function processBatch(
     hourlyLoad:          report.hourlyDebt,
     break_events,
     lastUpdated:         new Date().toISOString(),
+    schemaVersion:       SYNC_PAYLOAD_SCHEMA_VERSION,
   };
 
   // ── Push into offline sync queue (fires Firestore write when online) ──

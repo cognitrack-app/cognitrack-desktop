@@ -4,6 +4,9 @@ import type { ActiveWindowTracker } from './activeWindowTracker';
 import type { SyncEngine } from '@cognitrack/sync-engine';
 import { fetchSessionByDate } from '@cognitrack/api-client';
 import { getTodayDateString } from './utils';
+import { app } from 'electron';
+import os from 'os';
+import process from 'process';
 
 /**
  * Tray-only IPC handlers for the desktop agent.
@@ -93,5 +96,47 @@ export function registerIpcHandlers(
       // Return null so the renderer can show "unavailable" rather than crashing
       return null;
     }
+  });
+
+  // ── Diagnostics / Health Check ───────────────────────────────────────────
+
+  /**
+   * Returns comprehensive diagnostic information for health checks and debugging.
+   * Includes tracker status, store stats, sync queue status, and system info.
+   */
+  ipcMain.handle('diagnostics:getStatus', () => {
+    const trackerStatus = tracker.getStatus();
+    const syncStatus = syncEngine.getQueueStatus();
+    const today = getTodayDateString();
+    const todayMetrics = store.getDailyMetrics(today);
+    const switchCountToday = store.getSwitchCountToday();
+
+    return {
+      timestamp: new Date().toISOString(),
+      app: {
+        version: app.getVersion(),
+        platform: process.platform,
+        arch: process.arch,
+        electronVersion: process.versions.electron,
+        nodeVersion: process.versions.node,
+        uptimeSeconds: Math.floor(process.uptime()),
+      },
+      system: {
+        platform: os.platform(),
+        release: os.release(),
+        arch: os.arch(),
+        cpus: os.cpus().length,
+        totalMemoryMB: Math.round(os.totalmem() / 1024 / 1024),
+        freeMemoryMB: Math.round(os.freemem() / 1024 / 1024),
+        loadAvg: os.loadavg(),
+      },
+      tracker: trackerStatus,
+      store: {
+        switchCountToday,
+        hasTodayMetrics: !!todayMetrics,
+        dbPath: 'userData/db/cognitrack.db',
+      },
+      sync: syncStatus,
+    };
   });
 }

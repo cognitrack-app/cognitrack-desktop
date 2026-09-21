@@ -4,7 +4,7 @@
   "description": "CogniTrack desktop agent — silent cognitive load tracker with tray popover",
   "main": "dist-electron/index.js",
   "scripts": {
-    "dev": "concurrently \"vite\" \"tsc -p tsconfig.json --watch\" \"electron .\"",
+    "dev": "concurrently \"vite\" \"tsc -p tsconfig.json --watch\" \"electron . --max-old-space-size=512\"",
     "build": "tsc -p tsconfig.json && vite build",
     "postinstall": "electron-rebuild -f -w better-sqlite3,active-win",
     "pack": "electron-builder --dir --x64",

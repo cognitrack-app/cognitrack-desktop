@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
+import { autoUpdater, UpdateCheckResult } from 'electron-updater';
 import { registerIpcHandlers } from './electron/main/ipcHandlers';
 import { SQLiteStore } from './electron/main/sqliteStore';
 import { ActiveWindowTracker } from './electron/main/activeWindowTracker';
@@ -59,8 +60,54 @@ app.whenReady().then(async () => {
   const queueDbPath = path.join(dbDir, 'sync-queue.db');
   syncEngine = new SyncEngine(queueDbPath);
 
+  // 3b. Configure auto-updater (disabled by default — enable via publish config)
+  if (app.isPackaged) {
+    autoUpdater.logger = console;
+    autoUpdater.autoDownload = false; // Prompt user before downloading
+    autoUpdater.checkForUpdatesAndNotify().catch(err => {
+      console.warn('[autoUpdater] Initial check failed (likely no publish config):', err.message);
+    });
+
+    // Check for updates every 4 hours
+    setInterval(() => {
+      autoUpdater.checkForUpdatesAndNotify().catch(err =>
+        console.warn('[autoUpdater] Periodic check failed:', err.message)
+      );
+    }, 4 * 60 * 60 * 1000);
+
+    autoUpdater.on('update-available', (info) => {
+      console.log('[autoUpdater] Update available:', info.version);
+      // Could notify user via tray menu
+    });
+
+    autoUpdater.on('update-not-available', (info) => {
+      console.log('[autoUpdater] No update available, current:', info.version);
+    });
+
+    autoUpdater.on('error', (err) => {
+      console.error('[autoUpdater] Error:', err.message);
+    });
+  }
+
   // 4. Active window tracker (no start yet — needs auth first)
   tracker = new ActiveWindowTracker(store);
+
+  // 4b. Log active-win version for diagnostics (read from package.json)
+  (async () => {
+    try {
+      const path = await import('path');
+      const fs = await import('fs');
+      const pkgPath = path.join(__dirname, '..', 'node_modules', 'active-win', 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        console.log(`[startup] active-win version: ${pkg.version}`);
+      } else {
+        console.log('[startup] active-win version: unknown (package.json not found)');
+      }
+    } catch {
+      console.log('[startup] active-win version: unknown (read failed)');
+    }
+  })();
 
   // 5. Tray popover window (hidden by default)
   mainWindow = createPopoverWindow();
@@ -342,7 +389,7 @@ function scheduleHourlyBatch(): void {
  *    valid Firebase UID (20–128 alphanumeric chars).
  *  - Rejects immediately with a descriptive error if the UID is malformed,
  *    so the startup path fails loudly instead of hanging forever.
- *  - Rejects after 5 minutes if the renderer never fires the event at all
+ *  - Rejects after 90 seconds if the renderer never fires the event at all
  *    (e.g. sign-in page crashed, renderer never loaded).
  *
  * Previous bug: on invalid UID, code called resolve(waitForAuthFromRenderer())
@@ -352,11 +399,13 @@ function scheduleHourlyBatch(): void {
 function waitForAuthFromRenderer(): Promise<string> {
   return new Promise((resolve, reject) => {
     // Safety timeout — if renderer never fires the event (e.g. sign-in page
-    // crashed), reject after 5 minutes so startup can surface the error.
+    // crashed), reject after 90 seconds so startup can surface the error.
+    // Reduced from 5 minutes (DESK-04) to 90s for better UX — user sees
+    // retry prompt faster on auth failure.
     const timeout = setTimeout(() => {
       ipcMain.removeListener('auth:signedIn', handler);
-      reject(new Error('[auth] Sign-in timeout: renderer did not emit auth:signedIn within 5 minutes'));
-    }, 5 * 60 * 1000);
+      reject(new Error('[auth] Sign-in timeout: renderer did not emit auth:signedIn within 90 seconds'));
+    }, 90 * 1000);
 
     // FIX (CRIT-5): Use ipcMain.on instead of ipcMain.once so that renderer
     // reloads can re-signal. With ipcMain.once, if the renderer reloads during
